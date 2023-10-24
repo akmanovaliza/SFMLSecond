@@ -4,9 +4,10 @@
 #include "imgui.h"
 #include <SFML/Graphics.hpp>
 
-#include <omp.h>
 #include <functional>
 #include <vector>
+#include <thread>
+#include <omp.h>
 
 float determinant3x3(const std::vector<std::vector<float>>& matrix) {
 	if (matrix.size() != 3 || matrix[0].size() != 3 || matrix[1].size() != 3 || matrix[2].size() != 3) {
@@ -31,7 +32,7 @@ sf::Color interpolateColors(const sf::Color& color1, const sf::Color& color2, fl
 class RFuncSprite : public sf::Sprite
 {
 public:
-	void Create(const sf::Vector2u& size)
+	void Create(const sf::Vector2u& size, const int selectedNormalIndex)
 	{
 		_image.create(size.x, size.y, sf::Color::Cyan);
 		_texture.loadFromImage(_image);
@@ -39,9 +40,11 @@ public:
 
 		_firstColor = sf::Color::Black;
 		_secondColor = sf::Color::White;
+
+		_selectedNormalIndex = selectedNormalIndex;
 	}
 
-	void DrawRFunc(const std::function<float(const sf::Vector2f&)>& rfunc, const sf::FloatRect& subSpace, const int selectedNormalIndex)
+	void DrawRFunc(const std::function<float(const sf::Vector2f&)>& rfunc, const sf::FloatRect& subSpace)
 	{
 		sf::Vector2f spaceStep = {
 			subSpace.width / static_cast<float>(_image.getSize().x),
@@ -107,7 +110,7 @@ public:
 
 				float selectedNormal = nx;
 
-				switch (selectedNormalIndex)
+				switch (_selectedNormalIndex)
 				{
 				case 0:
 					break;
@@ -132,8 +135,24 @@ public:
 
 	void UpdatePalette(const sf::Color& firstColor, const sf::Color& secondColor)
 	{
+		for (int x = 0; x < _image.getSize().x - 1; ++x)
+		{
+			for (int y = 0; y < _image.getSize().y - 1; ++y)
+			{
+				float t = (static_cast<float>(_image.getPixel(x, y).r) - _firstColor.r) / (_secondColor.r - _firstColor.r);
+				auto pixelColor = interpolateColors(firstColor, secondColor, t);
+				_image.setPixel(x, y, pixelColor);
+			}
+		}
+
 		_firstColor = firstColor;
 		_secondColor = secondColor;
+		_texture.update(_image);
+	}
+
+	void SaveImageToFile(const std::string& filename)
+	{
+		_image.saveToFile(filename);
 	}
 
 private:
@@ -142,6 +161,8 @@ private:
 
 	sf::Texture _texture;
 	sf::Image _image;
+
+	int _selectedNormalIndex;
 };
 
 float RAnd(float w1, float w2) {
@@ -150,6 +171,20 @@ float RAnd(float w1, float w2) {
 
 float ROr(float w1, float w2) {
 	return w1 + w2 - std::sqrt((w1 * w1 + w2 * w2) - 2 * w1 * w2);
+}
+
+std::vector<RFuncSprite*> sprites;
+
+std::vector<std::thread> drawThreads;
+void DrawRFuncParallel(RFuncSprite* sprite, const std::function<float(const sf::Vector2f&)>& rfunc, const sf::FloatRect& subSpace)
+{
+	sprite->DrawRFunc(rfunc, subSpace);
+}
+
+std::vector<std::thread> updateThreads;
+void UpdatePaletteParallel(RFuncSprite* sprite, const sf::Color& firstColor, const sf::Color& secondColor)
+{
+	sprite->UpdatePalette(firstColor, secondColor);
 }
 
 int main()
@@ -165,19 +200,23 @@ int main()
 	auto spriteSize = sf::Vector2u{ window.getSize().x / 2, window.getSize().y / 2 };
 
 	RFuncSprite rFuncSpriteNx;
-	rFuncSpriteNx.Create(spriteSize);
+	rFuncSpriteNx.Create(spriteSize, 0);
+	sprites.push_back(&rFuncSpriteNx);
 
 	RFuncSprite rFuncSpriteNy;
-	rFuncSpriteNy.Create(spriteSize);
+	rFuncSpriteNy.Create(spriteSize, 1);
 	rFuncSpriteNy.setPosition(spriteSize.x, 0);
+	sprites.push_back(&rFuncSpriteNy);
 
 	RFuncSprite rFuncSpriteNz;
-	rFuncSpriteNz.Create(spriteSize);
+	rFuncSpriteNz.Create(spriteSize, 2);
 	rFuncSpriteNz.setPosition(0, spriteSize.y);
+	sprites.push_back(&rFuncSpriteNz);
 
 	RFuncSprite rFuncSpriteNw;
-	rFuncSpriteNw.Create(spriteSize);
+	rFuncSpriteNw.Create(spriteSize, 3);
 	rFuncSpriteNw.setPosition(spriteSize.x, spriteSize.y);
+	sprites.push_back(&rFuncSpriteNw);
 
 	std::function<float(const sf::Vector2f&)> rFunctions[5];
 
@@ -207,10 +246,18 @@ int main()
 	static ImVec4 firstColor(0, 0, 0, 1);
 	static ImVec4 secondColor(1, 1, 1, 1);
 
-	rFuncSpriteNx.DrawRFunc(complexFunction, subSpace, 0);
-	rFuncSpriteNy.DrawRFunc(complexFunction, subSpace, 1);
-	rFuncSpriteNz.DrawRFunc(complexFunction, subSpace, 2);
-	rFuncSpriteNw.DrawRFunc(complexFunction, subSpace, 3);
+	for (RFuncSprite* sprite : sprites)
+	{
+		std::thread t(DrawRFuncParallel, sprite, complexFunction, subSpace);
+		drawThreads.push_back(std::move(t));
+	}
+
+	for (std::thread& t : drawThreads)
+	{
+		t.join();
+	}
+
+	drawThreads.clear();
 
 	sf::Clock deltaClock;
 
@@ -250,27 +297,26 @@ int main()
 				static_cast<sf::Uint8>(secondColor.w * 255)
 			);
 
-			rFuncSpriteNx.UpdatePalette(sfFirstColor, sfSecondColor);
-			rFuncSpriteNx.DrawRFunc(complexFunction, subSpace, 0);
-			rFuncSpriteNy.UpdatePalette(sfFirstColor, sfSecondColor);
-			rFuncSpriteNy.DrawRFunc(complexFunction, subSpace, 1);
-			rFuncSpriteNz.UpdatePalette(sfFirstColor, sfSecondColor);
-			rFuncSpriteNz.DrawRFunc(complexFunction, subSpace, 2);
-			rFuncSpriteNw.UpdatePalette(sfFirstColor, sfSecondColor);
-			rFuncSpriteNw.DrawRFunc(complexFunction, subSpace, 3);
+			for (RFuncSprite* sprite : sprites)
+			{
+				std::thread t(UpdatePaletteParallel, sprite, sfFirstColor, sfSecondColor);
+				updateThreads.push_back(std::move(t));
+			}
+
+			for (std::thread& t : updateThreads)
+			{
+				t.join();
+			}
+
+			updateThreads.clear();
 		}
 
 		if (ImGui::Button("Save Image"))
 		{
-			sf::RenderTexture renderTexture;
-			renderTexture.create(window.getSize().x, window.getSize().y);
-
-			renderTexture.draw(rFuncSpriteNx);
-			renderTexture.draw(rFuncSpriteNy);
-			renderTexture.draw(rFuncSpriteNz);
-			renderTexture.draw(rFuncSpriteNw);
-
-			renderTexture.getTexture().copyToImage().saveToFile("image.png");
+			rFuncSpriteNx.SaveImageToFile("nx.png");
+			rFuncSpriteNy.SaveImageToFile("ny.png");
+			rFuncSpriteNz.SaveImageToFile("nz.png");
+			rFuncSpriteNw.SaveImageToFile("nw.png");
 		}
 
 		ImGui::End();
